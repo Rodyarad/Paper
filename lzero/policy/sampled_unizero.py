@@ -1,6 +1,5 @@
 import copy
 import logging
-import os
 from collections import defaultdict
 from typing import Dict, List, Tuple, Union
 
@@ -853,27 +852,6 @@ class SampledUniZeroPolicy(UniZeroPolicy):
             Evaluate mode init method. Called by ``self.__init__``. Initialize the eval model and MCTS utils.
         """
         self._eval_model = self._model
-        self._log_causality_probs = getattr(self._cfg, 'log_causality_probs', False)
-        self._causality_log_dir = getattr(self._cfg, 'causality_log_dir', './visuals_inter')
-        self._causality_policy_buffer = defaultdict(list)
-        self._causality_value_buffer = defaultdict(list)
-        self._causality_episode = defaultdict(lambda: 1)
-        if self._log_causality_probs:
-            os.makedirs(self._causality_log_dir, exist_ok=True)
-
-        self._log_unizero_slots = getattr(self._cfg, 'log_unizero_slots', False)
-        self._unizero_slots_dir = getattr(self._cfg, 'unizero_slots_dir', './visuals_inter')
-        self._sa_slots_buffer = defaultdict(list)
-        self._sa_slots_episode = defaultdict(lambda: 1)
-        if self._log_unizero_slots:
-            os.makedirs(self._unizero_slots_dir, exist_ok=True)
-        self._log_eval_actions = getattr(self._cfg, 'log_eval_actions', False)
-        self._eval_actions_dir = getattr(self._cfg, 'eval_actions_dir', './visuals_inter')
-        self._eval_actions_buffer = defaultdict(list)
-        self._eval_actions_episode = defaultdict(lambda: 1)
-        if self._log_eval_actions:
-            os.makedirs(self._eval_actions_dir, exist_ok=True)
-
         if self._cfg.mcts_ctree:
             self._mcts_eval = MCTSCtree(self._cfg)
         else:
@@ -924,18 +902,6 @@ class SampledUniZeroPolicy(UniZeroPolicy):
             network_output = self._eval_model.initial_inference(self.last_batch_obs_eval, self.last_batch_action_eval, data)
             latent_state_roots, reward_roots, pred_values, policy_logits = mz_network_output_unpack(network_output)
 
-            if self._log_causality_probs and self._cfg.model.model_type == 'slot':
-                wm = self._eval_model.world_model
-                policy_caus = getattr(wm, '_last_policy_causality', None)
-                value_caus = getattr(wm, '_last_value_causality', None)
-                if policy_caus is not None and value_caus is not None:
-                    policy_caus_np = policy_caus.squeeze(-1).cpu().numpy()
-                    value_caus_np = value_caus.squeeze(-1).cpu().numpy()
-                    for i, env_id in enumerate(ready_env_id):
-                        eid = int(env_id)
-                        self._causality_policy_buffer[eid].append(policy_caus_np[i])
-                        self._causality_value_buffer[eid].append(value_caus_np[i])
-
             # if not in training, obtain the scalars of the value/reward
             pred_values = self.value_inverse_scalar_transform_handle(pred_values).detach().cpu().numpy()  # shape（B, 1）
             latent_state_roots = latent_state_roots.detach().cpu().numpy()
@@ -979,32 +945,19 @@ class SampledUniZeroPolicy(UniZeroPolicy):
                     getattr(action, 'value', action) for action in roots_sampled_actions[i]
                 ])
 
-                if self._log_unizero_slots and self._cfg.model.model_type == 'slot':
-                    # Save slot-attention (encoder) slots from initial_inference.
-                    sa_slots = latent_state_roots[i]  # (num_slots, slot_dim)
-                    self._sa_slots_buffer[int(env_id)].append(np.asarray(sa_slots, dtype=np.float32).copy())
-
                 # NOTE: Only legal actions possess visit counts, so the ``action_index_in_legal_action_set`` represents
                 # the index within the legal action set, rather than the index in the entire action set.
                 # Setting deterministic=True implies choosing the action with the highest value (argmax) rather than sampling during the evaluation phase.
-                action_index_in_sampled_set, visit_count_distribution_entropy = select_action(
+                action, visit_count_distribution_entropy = select_action(
                     distributions, temperature=1, deterministic=True
                 )
                 # ==============================================================
                 # sampled related core code
                 # ==============================================================
-                action = get_action(roots_sampled_actions, i, action_index_in_sampled_set)
+                action = get_action(roots_sampled_actions, i, action)
 
                 if not self._cfg.model.continuous_action_space:
                     action = int(action.item())
-
-                if self._log_eval_actions:
-                    if self._cfg.model.continuous_action_space:
-                        self._eval_actions_buffer[int(env_id)].append(
-                            np.asarray(action, dtype=np.float32).copy()
-                        )
-                    else:
-                        self._eval_actions_buffer[int(env_id)].append(int(action))
 
                 output[env_id] = {
                     'action': action,

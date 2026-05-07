@@ -22,8 +22,6 @@ from omegaconf import OmegaConf
 from zoo.causal_world.env.causal_world.cw_envs import CwTargetEnv
 from collections import namedtuple
 
-from zoo.common.ensure_spec_id import EnsureSpecIdWrapper
-
 
 def wrap_lightzero(config: EasyDict) -> gym.Env:
     """
@@ -40,14 +38,11 @@ def wrap_lightzero(config: EasyDict) -> gym.Env:
     env_config = OmegaConf.load(config.env_config_path)
     env = CwTargetEnv(env_config, config.seed)
     env.action_space.seed(config.seed)
-    env = EnsureSpecIdWrapper(env, fallback_id=env.__class__.__name__)
 
     if hasattr(config, 'save_replay') and config.save_replay \
             and hasattr(config, 'replay_path') and config.replay_path is not None:
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        env_spec = getattr(env, "spec", None)
-        env_name = env_spec.id if env_spec is not None and getattr(env_spec, "id", None) is not None else env.__class__.__name__
-        video_name = f'{env_name}-video-{timestamp}'
+        video_name = f'{env.spec.id}-video-{timestamp}'
         env = RecordVideo(
             env,
             video_folder=config.replay_path,

@@ -3,7 +3,6 @@ import threading
 import time
 from collections import namedtuple
 from typing import Any, Callable, Dict, Optional, Tuple
-import os
 
 import numpy as np
 import torch

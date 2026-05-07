@@ -239,70 +239,24 @@ class SLATE_Module(nn.Module):
         return (metrics, z) if with_rep else metrics
 
     def get_samples(self, obs: Tensor, prev_slots=None) -> dict:
+        # get z
+        z, z_hard = self._get_z(obs)
+        B, _, H_enc, W_enc = z.size()
+        # dvae recon
+        recon = self._dvae.decode(z)
         # get slots
         slots, attns = self._get_slots(obs, with_attns=True, prev_slots=prev_slots)
         attns = attns.transpose(-1, -2).reshape(
             obs.shape[0], self._num_slots, 1, self._obs_size, self._obs_size
         )
         attns = obs.unsqueeze(1) * attns + (1.0 - attns)
-        # Keep only slot visualizations in samples.
-        # `attns` is (B, num_slots, C, H, W); concatenate slots horizontally.
-        slot_strip = torch.cat(list(torch.unbind(attns, dim=1)), dim=-1)  # (B, C, H, num_slots * W)
-        return {"samples": for_viz(slot_strip)}
-
-    def get_slotwise_reconstructions_from_slots(self, slots: Tensor) -> dict:
-        """
-        Given precomputed slot representations, decode each slot separately and
-        also return a combined image for all slots.
-
-        Args:
-            slots: Tensor of shape (B, num_slots, slot_size) matching the
-                slot representation expected by the SLATE decoder.
-
-        Returns:
-            A dict containing:
-                - 'per_slot_recons': Tensor of shape (B, num_slots, C, H, W)
-                  with reconstruction for each individual slot.
-                - 'combined_recons': Tensor of shape (B, C, H, num_slots * W)
-                  where per-slot reconstructions are concatenated horizontally.
-                - 'full_recons': Tensor of shape (B, C, H, W) reconstructed
-                  from all slots together (i.e., the standard reconstruction).
-        """
-        B, num_slots, D = slots.shape
-
-        full_recons = self._gen_imgs(slots)  # (B, C, H, W)
-
-        per_slot_recons = []
-        for slot_idx in range(num_slots):
-            masked_slots = slots.new_zeros((B, num_slots, D))
-            masked_slots[:, slot_idx : slot_idx + 1, :] = slots[:, slot_idx : slot_idx + 1, :]
-            recon_slot = self._gen_imgs(masked_slots)  # (B, C, H, W)
-            per_slot_recons.append(recon_slot)
-
-        per_slot_recons = torch.stack(per_slot_recons, dim=1)  # (B, num_slots, C, H, W)
-
-        B, _, C, H, W = per_slot_recons.shape
-        separator_width = 2
-
-        separator = torch.ones(
-            (B, C, H, separator_width),
-            device=per_slot_recons.device,
-            dtype=per_slot_recons.dtype,
-        )
-
-        pieces = []
-        for i in range(num_slots):
-            pieces.append(per_slot_recons[:, i])  # (B, C, H, W)
-            if i < num_slots - 1:
-                pieces.append(separator)
-
-        combined_recons = torch.cat(pieces, dim=-1)  # (B, C, H, num_slots * W + gaps)
-
-        return {
-            "per_slot_recons": per_slot_recons,
-            "combined_recons": combined_recons,
-            "full_recons": full_recons,
-        }
+        if self._use_bcdec:
+            recon = self._dec(slots)
+            return {"samples": for_viz(visualize([obs, recon, attns]))}
+        else:
+            # generate image tokens auto-regressively
+            recon_tf = self._gen_imgs(slots)
+            return {"samples": for_viz(visualize([obs, recon, recon_tf, attns]))}
 
     def update_tau(self, step: int) -> None:
         # update tau

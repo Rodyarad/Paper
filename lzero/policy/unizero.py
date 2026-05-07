@@ -2,7 +2,6 @@ import copy
 import logging
 from collections import defaultdict
 from typing import Any, Dict, List, Tuple, Union
-import os
 
 import numpy as np
 import torch
@@ -315,11 +314,6 @@ class UniZeroPolicy(MuZeroPolicy):
         policy_ls_eps_decay_steps=50000,
 
         label_smoothing_eps=0.1,  # TODO: For value
-
-        log_causality_probs=False,
-        causality_log_dir='./visuals_inter',
-        log_unizero_slots=False,
-        unizero_slots_dir='./visuals_inter',
 
         # (bool) Whether to use continuous (fixed) label smoothing throughout training
         use_continuous_label_smoothing=False,
@@ -1514,27 +1508,6 @@ class UniZeroPolicy(MuZeroPolicy):
         """
         self._eval_model = self._model
 
-        self._log_causality_probs = getattr(self._cfg, 'log_causality_probs', False)
-        self._causality_log_dir = getattr(self._cfg, 'causality_log_dir', './visuals_inter')
-        self._causality_policy_buffer = defaultdict(list)
-        self._causality_value_buffer = defaultdict(list)
-        self._causality_episode = defaultdict(lambda: 1)
-        if self._log_causality_probs:
-            os.makedirs(self._causality_log_dir, exist_ok=True)
-
-        self._log_unizero_slots = getattr(self._cfg, 'log_unizero_slots', False)
-        self._unizero_slots_dir = getattr(self._cfg, 'unizero_slots_dir', './visuals_inter')
-        self._sa_slots_buffer = defaultdict(list)
-        self._sa_slots_episode = defaultdict(lambda: 1)
-        if self._log_unizero_slots:
-            os.makedirs(self._unizero_slots_dir, exist_ok=True)
-        self._log_eval_actions = getattr(self._cfg, 'log_eval_actions', False)
-        self._eval_actions_dir = getattr(self._cfg, 'eval_actions_dir', './visuals_inter')
-        self._eval_actions_buffer = defaultdict(list)
-        self._eval_actions_episode = defaultdict(lambda: 1)
-        if self._log_eval_actions:
-            os.makedirs(self._eval_actions_dir, exist_ok=True)
-
         # Create a configuration copy for eval MCTS and set specific simulation count
         mcts_eval_cfg = copy.deepcopy(self._cfg)
         mcts_eval_cfg.num_simulations = self._cfg.eval_num_simulations
@@ -1594,18 +1567,6 @@ class UniZeroPolicy(MuZeroPolicy):
             network_output = self._eval_model.initial_inference(self.last_batch_obs_eval, self.last_batch_action_eval, data)
             latent_state_roots, reward_roots, pred_values, policy_logits = mz_network_output_unpack(network_output)
 
-            if self._log_causality_probs and self._cfg.model.model_type == 'slot':
-                wm = self._eval_model.world_model
-                policy_caus = getattr(wm, '_last_policy_causality', None)
-                value_caus = getattr(wm, '_last_value_causality', None)
-                if policy_caus is not None and value_caus is not None:
-                    policy_caus_np = policy_caus.squeeze(-1).cpu().numpy()
-                    value_caus_np = value_caus.squeeze(-1).cpu().numpy()
-                    for i, env_id in enumerate(ready_env_id):
-                        eid = int(env_id)
-                        self._causality_policy_buffer[eid].append(policy_caus_np[i])
-                        self._causality_value_buffer[eid].append(value_caus_np[i])
-
             # if not in training, obtain the scalars of the value/reward
             pred_values = self.value_inverse_scalar_transform_handle(pred_values).detach().cpu().numpy()  # shape（B, 1）
             latent_state_roots = latent_state_roots.detach().cpu().numpy()
@@ -1649,16 +1610,6 @@ class UniZeroPolicy(MuZeroPolicy):
                     predicted_next = self._eval_model.tokenizer.decode_to_plain_text(embeddings=next_latent_state, max_length=256)
                 else:
                     predicted_next = None
-
-                if self._log_unizero_slots and self._cfg.model.model_type == 'slot':
-                    # Save slot-attention (encoder) slots from initial_inference
-                    sa_slots = latent_state_roots[i]  # already numpy (num_slots, slot_dim)
-                    self._sa_slots_buffer[int(env_id)].append(
-                        np.asarray(sa_slots, dtype=np.float32).copy()
-                    )
-
-                if self._log_eval_actions:
-                    self._eval_actions_buffer[int(env_id)].append(int(action))
 
                 output[env_id] = {
                     'action': action,
@@ -1769,59 +1720,6 @@ class UniZeroPolicy(MuZeroPolicy):
 
             # The key condition: `current_steps` is None only on the end-of-episode reset call from the evaluator.
             if current_steps is None:
-                # Flush causality probabilities for the finished episode(s).
-                if getattr(self, '_log_causality_probs', False) and getattr(self._cfg, 'model', None) is not None and self._cfg.model.model_type == 'slot':
-                    for _env_id in env_ids_to_reset:
-                        eid = int(_env_id)
-                        pol_buf = self._causality_policy_buffer.get(eid, [])
-                        val_buf = self._causality_value_buffer.get(eid, [])
-                        if len(pol_buf) > 0:
-                            ep_idx = int(self._causality_episode[eid])
-                            out_path = os.path.join(self._causality_log_dir, 'causal_probs.txt')
-                            with open(out_path, 'w') as f:
-                                f.write("step\ttype\tslot_values\n")
-                                for t, (p, v) in enumerate(zip(pol_buf, val_buf)):
-                                    p_str = ','.join(f'{x:.6f}' for x in p.flatten())
-                                    v_str = ','.join(f'{x:.6f}' for x in v.flatten())
-                                    f.write(f"{t}\tpolicy\t{p_str}\n")
-                                    f.write(f"{t}\tvalue\t{v_str}\n")
-                            self._causality_policy_buffer[eid] = []
-                            self._causality_value_buffer[eid] = []
-                            self._causality_episode[eid] = ep_idx + 1
-
-                # Flush logged UniZero predicted slots for the finished episode(s).
-                if getattr(self, '_log_unizero_slots', False) and getattr(self._cfg, 'model', None) is not None and self._cfg.model.model_type == 'slot':
-                    for _env_id in env_ids_to_reset:
-                        eid = int(_env_id)
-
-                        # Flush slot-attention (encoder) slots
-                        sa_buf = self._sa_slots_buffer.get(eid, [])
-                        if len(sa_buf) > 0:
-                            sa_np = np.stack(sa_buf, axis=0)  # (T, num_slots, slot_dim)
-                            ep_idx = int(self._sa_slots_episode[eid])
-                            out_path = os.path.join(self._unizero_slots_dir, 'sa_slots.npy')
-                            np.save(out_path, sa_np)
-                            self._sa_slots_buffer[eid] = []
-                            self._sa_slots_episode[eid] = ep_idx + 1
-
-                # Flush eval actions for the finished episode(s).
-                if getattr(self, '_log_eval_actions', False):
-                    for _env_id in env_ids_to_reset:
-                        eid = int(_env_id)
-                        action_buf = self._eval_actions_buffer.get(eid, [])
-                        if len(action_buf) > 0:
-                            if getattr(self._cfg.model, 'continuous_action_space', False):
-                                action_np = np.stack(
-                                    [np.asarray(a, dtype=np.float32).reshape(-1) for a in action_buf], axis=0
-                                )
-                            else:
-                                action_np = np.asarray(action_buf, dtype=np.int64)
-                            ep_idx = int(self._eval_actions_episode[eid])
-                            out_path = os.path.join(self._eval_actions_dir, 'actions.npy')
-                            np.save(out_path, action_np)
-                            self._eval_actions_buffer[eid] = []
-                            self._eval_actions_episode[eid] = ep_idx + 1
-
                 world_model = self._eval_model.world_model
 
                 # The recurrent cache is global.
